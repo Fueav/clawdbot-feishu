@@ -51,7 +51,7 @@ export async function monitorFeishuProvider(opts: MonitorFeishuOpts = {}): Promi
     return monitorWebSocket({ cfg, feishuCfg: feishuCfg!, runtime: opts.runtime, abortSignal: opts.abortSignal });
   }
 
-  log("feishu: webhook mode not implemented in monitor, use HTTP server directly");
+  return monitorWebhook({ cfg, feishuCfg: feishuCfg!, runtime: opts.runtime, abortSignal: opts.abortSignal });
 }
 
 async function monitorWebSocket(params: {
@@ -141,6 +141,88 @@ async function monitorWebSocket(params: {
       abortSignal?.removeEventListener("abort", handleAbort);
       reject(err);
     }
+  });
+}
+
+async function monitorWebhook(params: {
+  cfg: ClawdbotConfig;
+  feishuCfg: FeishuConfig;
+  runtime?: RuntimeEnv;
+  abortSignal?: AbortSignal;
+}): Promise<void> {
+  const { cfg, feishuCfg, runtime, abortSignal } = params;
+  const log = runtime?.log ?? console.log;
+  const error = runtime?.error ?? console.error;
+
+  const webhookPath = feishuCfg.webhookPath ?? "/feishu/events";
+  const webhookPort = feishuCfg.webhookPort;
+
+  if (!webhookPort) {
+    throw new Error("feishu: webhookPort is required for webhook mode");
+  }
+
+  log(`feishu: starting webhook server on port ${webhookPort}, path: ${webhookPath}`);
+
+  const chatHistories = new Map<string, HistoryEntry[]>();
+  const eventDispatcher = createEventDispatcher(feishuCfg);
+
+  eventDispatcher.register({
+    "im.message.receive_v1": async (data) => {
+      try {
+        const event = data as unknown as FeishuMessageEvent;
+        await handleFeishuMessage({ cfg, event, botOpenId, runtime, chatHistories });
+      } catch (err) {
+        error(`feishu: error handling message event: ${String(err)}`);
+      }
+    },
+    "im.message.message_read_v1": async () => {},
+    "im.chat.member.bot.added_v1": async (data) => {
+      const event = data as unknown as FeishuBotAddedEvent;
+      log(`feishu: bot added to chat ${event.chat_id}`);
+    },
+    "im.chat.member.bot.deleted_v1": async (data) => {
+      const event = data as unknown as { chat_id: string };
+      log(`feishu: bot removed from chat ${event.chat_id}`);
+    },
+  });
+
+  const http = await import("node:http");
+  const server = http.createServer();
+
+  server.on("request", Lark.adaptDefault(webhookPath, eventDispatcher, {
+    autoChallenge: true,
+  }));
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      server.close(() => log("feishu: webhook server closed"));
+    };
+
+    const handleAbort = () => {
+      log("feishu: abort signal received, stopping webhook server");
+      cleanup();
+      resolve();
+    };
+
+    if (abortSignal?.aborted) {
+      cleanup();
+      resolve();
+      return;
+    }
+
+    abortSignal?.addEventListener("abort", handleAbort, { once: true });
+
+    server.on("error", (err) => {
+      error(`feishu: webhook server error: ${String(err)}`);
+      abortSignal?.removeEventListener("abort", handleAbort);
+      reject(err);
+    });
+
+    server.on("listening", () => {
+      log(`feishu: webhook server listening on port ${webhookPort}`);
+    });
+
+    server.listen(webhookPort);
   });
 }
 
