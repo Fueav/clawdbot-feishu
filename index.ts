@@ -45,8 +45,8 @@ export {
 export { feishuPlugin } from "./src/channel.js";
 
 const plugin = {
-  id: "feishu",
-  name: "Feishu",
+  id: "lark",
+  name: "Lark",
   description: "Feishu/Lark channel plugin",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
